@@ -11,3 +11,12 @@ Running 30s test @ http://127.0.0.1:8888/
 Requests/sec:  12007.92
 Transfer/sec:      1.47MB
 ```
+
+## Memory Usage
+
+Measured using:
+```bash
+psrecord $(pgrep -f main.py) --plot mem.png --interval 1
+```
+
+![Memory Usage](mem.png)
