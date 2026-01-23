@@ -1,0 +1,48 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# VSCode
+.vscode/
+
+# Logs
+*.log
+
+# Local configs (do not commit secrets)
+app_conf.yml
+logging.conf
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Environment variables
+.env
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# IDE
+.idea/
+
+# Runtime files
+*.pid
+*.sock
