@@ -14,10 +14,6 @@ env/
 # Logs
 *.log
 
-# Local configs (do not commit secrets)
-app_conf.yml
-logging.conf
-
 # Test cache
 .pytest_cache/
 .coverage
