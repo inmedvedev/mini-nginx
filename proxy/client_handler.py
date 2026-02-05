@@ -1,9 +1,11 @@
 import asyncio
+import logging
 import socket
 import time
 
 
 BUF = 256 * 1024
+logger = logging.getLogger("proxy")
 
 
 class Deadline:
@@ -12,6 +14,13 @@ class Deadline:
 
     def left(self) -> float:
         return max(0.0, self.end - time.monotonic())
+
+
+def get_timeout(deadline: Deadline, op_timeout: float | None) -> float:
+    left = deadline.left()
+    if op_timeout is None:
+        return left
+    return min(left, op_timeout)
 
 
 def set_nodelay(writer: asyncio.StreamWriter):
@@ -35,59 +44,80 @@ async def read_headers(reader: asyncio.StreamReader):
     return method, path, version, headers, data
 
 
-async def stream_fixed(reader, writer, size, deadline):
+async def stream_fixed(reader, writer, size, deadline, read_timeout, write_timeout):
     left = size
 
     while left > 0:
         chunk = await asyncio.wait_for(
             reader.read(min(BUF, left)),
-            deadline.left()
+            get_timeout(deadline, read_timeout)
         )
 
         if not chunk:
             break
 
         writer.write(chunk)
-        await writer.drain()
+        await asyncio.wait_for(
+            writer.drain(),
+            get_timeout(deadline, write_timeout)
+        )
         left -= len(chunk)
 
 
-async def stream_chunked(reader, writer, deadline):
+async def stream_chunked(reader, writer, deadline, read_timeout, write_timeout):
     while True:
         line = await asyncio.wait_for(
             reader.readline(),
-            deadline.left()
+            get_timeout(deadline, read_timeout)
         )
 
         writer.write(line)
-        await writer.drain()
+        await asyncio.wait_for(
+            writer.drain(),
+            get_timeout(deadline, write_timeout)
+        )
 
         size = int(line.strip(), 16)
 
         if size == 0:
-            trailer = await reader.readuntil(b"\r\n\r\n")
+            trailer = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"),
+                get_timeout(deadline, read_timeout)
+            )
             writer.write(trailer)
-            await writer.drain()
+            await asyncio.wait_for(
+                writer.drain(),
+                get_timeout(deadline, write_timeout)
+            )
             break
 
-        data = await reader.readexactly(size + 2)
+        data = await asyncio.wait_for(
+            reader.readexactly(size + 2),
+            get_timeout(deadline, read_timeout)
+        )
         writer.write(data)
-        await writer.drain()
+        await asyncio.wait_for(
+            writer.drain(),
+            get_timeout(deadline, write_timeout)
+        )
 
 
-async def pipe(reader, writer, deadline):
+async def pipe(reader, writer, deadline, read_timeout, write_timeout):
     try:
         while not reader.at_eof():
             data = await asyncio.wait_for(
                 reader.read(BUF),
-                deadline.left()
+                get_timeout(deadline, read_timeout)
             )
 
             if not data:
                 break
 
             writer.write(data)
-            await writer.drain()
+            await asyncio.wait_for(
+                writer.drain(),
+                get_timeout(deadline, write_timeout)
+            )
 
     except Exception:
         pass
@@ -113,12 +143,18 @@ async def handle_client(
 
         while True:
             deadline = Deadline(timeouts.total)
+            path_str = ""
+            method_str = ""
+            status_code: int | None = None
 
             try:
                 method, path, ver, headers, raw = await asyncio.wait_for(
                     read_headers(reader),
-                    deadline.left()
+                    get_timeout(deadline, timeouts.read)
                 )
+
+                method_str = method.decode(errors="replace")
+                path_str = path.decode(errors="replace")
 
             except Exception:
                 break
@@ -138,7 +174,7 @@ async def handle_client(
                     else:
                         up_reader, up_writer = await asyncio.wait_for(
                             asyncio.open_connection(host, port),
-                            deadline.left()
+                            get_timeout(deadline, timeouts.connect)
                         )
                         set_nodelay(up_writer)
 
@@ -148,33 +184,49 @@ async def handle_client(
 
             try:
                 up_writer.write(raw)
-                await up_writer.drain()
+                await asyncio.wait_for(
+                    up_writer.drain(),
+                    get_timeout(deadline, timeouts.write)
+                )
 
                 if b"content-length" in headers:
                     await stream_fixed(
                         reader,
                         up_writer,
                         int(headers[b"content-length"]),
-                        deadline
+                        deadline,
+                        timeouts.read,
+                        timeouts.write
                     )
 
                 elif headers.get(b"transfer-encoding") == b"chunked":
                     await stream_chunked(
                         reader,
                         up_writer,
-                        deadline
+                        deadline,
+                        timeouts.read,
+                        timeouts.write
                     )
 
                 resp_hdr = await asyncio.wait_for(
                     up_reader.readuntil(b"\r\n\r\n"),
-                    deadline.left()
+                    get_timeout(deadline, timeouts.read)
                 )
 
                 writer.write(resp_hdr)
-                await writer.drain()
+                await asyncio.wait_for(
+                    writer.drain(),
+                    get_timeout(deadline, timeouts.write)
+                )
 
                 resp_lines = resp_hdr.split(b"\r\n")
                 resp_headers = {}
+
+                if resp_lines:
+                    try:
+                        status_code = int(resp_lines[0].split()[1])
+                    except Exception:
+                        status_code = None
 
                 for line in resp_lines[1:]:
                     if not line:
@@ -188,28 +240,45 @@ async def handle_client(
                         up_reader,
                         writer,
                         int(resp_headers[b"content-length"]),
-                        deadline
+                        deadline,
+                        timeouts.read,
+                        timeouts.write
                     )
 
                 elif resp_headers.get(b"transfer-encoding") == b"chunked":
                     await stream_chunked(
                         up_reader,
                         writer,
-                        deadline
+                        deadline,
+                        timeouts.read,
+                        timeouts.write
                     )
 
                 else:
                     await pipe(
                         up_reader,
                         writer,
-                        deadline
+                        deadline,
+                        timeouts.read,
+                        timeouts.write
                     )
 
             except asyncio.TimeoutError:
+                logger.error(
+                    "method=%s path=%s status=504",
+                    method_str,
+                    path_str
+                )
                 await send_504(writer)
                 break
 
             except Exception as e:
+                logger.error(
+                    "method=%s path=%s status=502 error=%s",
+                    method_str,
+                    path_str,
+                    type(e).__name__
+                )
                 await send_502(writer)
                 break
 
@@ -218,6 +287,13 @@ async def handle_client(
                     backend,
                     (up_reader, up_writer)
                 )
+
+            # logger.info(
+            #     "method=%s path=%s status=%s",
+            #     method_str,
+            #     path_str,
+            #     status_code if status_code is not None else "-"
+            # )
 
             if (
                 headers.get(b"connection") == b"close" 

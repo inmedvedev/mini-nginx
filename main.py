@@ -1,7 +1,6 @@
 import asyncio
 import itertools
 import logging
-import logging.config
 from functools import partial
 import uvloop
 from proxy.config import load_config
@@ -9,13 +8,13 @@ from proxy.config import load_config
 from proxy.upstream_pool import UpstreamConnPool
 from proxy.timeouts import Timeouts
 from proxy.client_handler import handle_client
+from proxy.logger import setup_logging
 
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
-logging.config.fileConfig("logging.conf")
+#setup_logging("logging.conf")
 logger = logging.getLogger("")
-
 
 class UpstreamPool:
     def __init__(self, backends):

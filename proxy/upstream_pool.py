@@ -9,7 +9,6 @@ class UpstreamConnPool:
 
     async def acquire(self, backend):
         pool = self._pools[backend]
-
         try:
             reader, writer = pool.get_nowait()
 
